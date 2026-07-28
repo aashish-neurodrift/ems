@@ -1,0 +1,28 @@
+{
+  "name": "mwp-sync",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone daily MWP -> AIQMS employee sync job (pre-port prototype for omind/backend/services/mwp-sync-service)",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "sync:once": "tsx src/run.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.7",
+    "node-cron": "^3.0.3",
+    "pg": "^8.13.1",
+    "sequelize": "^6.37.5",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/node-cron": "^3.0.11",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

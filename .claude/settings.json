@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh repo *)",
+      "Bash(gh auth *)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" https://github.com/aashish-neurodrift/ems)",
+      "Bash(git config *)",
+      "Bash(git remote *)",
+      "Bash(security find-internet-password *)",
+      "Bash(security delete-internet-password *)",
+      "Read(//Users/aashishrawte/**)",
+      "Bash(env)"
+    ]
+  }
+}

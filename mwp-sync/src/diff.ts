@@ -1,7 +1,8 @@
 import { Op } from 'sequelize';
 
+import type { Category } from './config.js';
 import { buildExpectedProcessPath } from './tree.js';
-import type { MwpSyncModels, UserRole } from './db/models.js';
+import type { ControlPlaneModels, MwpSyncModels, UserRole } from './db/models.js';
 import type { NormalizedEmployee } from './normalize.js';
 
 export interface CurrentUserState {
@@ -11,6 +12,11 @@ export interface CurrentUserState {
   active: boolean;
   role: UserRole | null;
   roleAssignmentId: string | null;
+  /** The category-specific PermissionGroup id actually assigned — the authoritative signal for
+   * categoryChanged, since supervisor/team_leader collapse to the SAME legacy `role` value
+   * (QA_MANAGER; see CATEGORY_TO_ROLE and db/models.ts's UserRole docstring). Comparing `role`
+   * alone would miss a supervisor<->team_leader transition. */
+  permissionGroupId: string | null;
   supervisorId: string | null;
   activeProcessPaths: string[];
 }
@@ -39,9 +45,11 @@ export interface DiffResult {
 /** Loads every MWP-sourced user currently in the workspace, keyed by employeeId (= fusion_id). */
 export async function loadCurrentState(
   models: MwpSyncModels,
+  controlPlaneModels: ControlPlaneModels,
   workspaceId: string,
 ): Promise<Map<string, CurrentUserState>> {
-  const { User, RoleAssignment, NodeAssignment, WorkspaceNode } = models;
+  const { RoleAssignment, NodeAssignment, WorkspaceNode } = models;
+  const { User } = controlPlaneModels;
 
   const users = await User.findAll({ where: { workspaceId, employeeId: { [Op.ne]: null } } });
   const userIds = users.map((u) => u.id);
@@ -93,6 +101,7 @@ export async function loadCurrentState(
       active: user.active,
       role: (user.role as UserRole) ?? null,
       roleAssignmentId: ra?.id ?? null,
+      permissionGroupId: ra?.permissionGroupId ?? null,
       supervisorId: ra?.supervisorId ?? null,
       activeProcessPaths: (processPathsByUserId.get(user.id) ?? []).sort(),
     });
@@ -100,22 +109,15 @@ export async function loadCurrentState(
   return result;
 }
 
-function expectedProcessPaths(incoming: NormalizedEmployee): string[] {
+function expectedProcessPaths(rootPath: string, incoming: NormalizedEmployee): string[] {
   return incoming.clientProcessPairs
-    .map((pair) => buildExpectedProcessPath(incoming.officeName, pair.client, pair.process))
+    .map((pair) => buildExpectedProcessPath(rootPath, incoming.officeName, pair.client, pair.process))
     .sort();
 }
 
 function sameStringArray(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((value, index) => value === b[index]);
 }
-
-const CATEGORY_TO_ROLE: Record<string, UserRole> = {
-  agent: 'AGENT',
-  qa: 'QA',
-  supervisor: 'SUPERVISOR',
-  team_leader: 'TEAM_LEADER',
-};
 
 /**
  * `incomingEmployees` must be the FULL normalized pull, including unclassified records
@@ -129,6 +131,8 @@ const CATEGORY_TO_ROLE: Record<string, UserRole> = {
 export function diff(
   currentByEmployeeId: Map<string, CurrentUserState>,
   incomingEmployees: NormalizedEmployee[],
+  rootPath: string,
+  permissionGroupIdByCategory: Record<Category, string>,
 ): DiffResult {
   const employeeIdToUserId = new Map<string, string>();
   for (const [employeeId, state] of currentByEmployeeId) {
@@ -155,10 +159,13 @@ export function diff(
       continue;
     }
 
-    // No `!== null` guard here: incomingRole legitimately being null (category dropped out of
-    // scope) must still register as a change against a non-null current.role.
-    const incomingRole = incoming.category ? CATEGORY_TO_ROLE[incoming.category] : null;
-    const categoryChanged = incomingRole !== current.role;
+    // Compared by permissionGroupId, not the coarse `role` column: supervisor and team_leader
+    // both map to the SAME legacy role value (QA_MANAGER — see CATEGORY_TO_ROLE in apply.ts), so
+    // comparing `role` would miss a supervisor<->team_leader transition. permissionGroupId is
+    // category-specific and catches every transition, including category dropping to null (no
+    // `!== null` guard here — that must still register as a change against a non-null current).
+    const expectedPermissionGroupId = incoming.category ? permissionGroupIdByCategory[incoming.category] : null;
+    const categoryChanged = expectedPermissionGroupId !== current.permissionGroupId;
 
     // Known limitation: employeeIdToUserId only knows about users already in the DB before this
     // run. If an EXISTING employee's new supervisor is itself a brand-new hire in this SAME daily
@@ -173,7 +180,10 @@ export function diff(
 
     const statusChanged = incoming.active !== current.active;
     const emailChanged = incoming.email !== current.email;
-    const nodeChanged = !sameStringArray(expectedProcessPaths(incoming), current.activeProcessPaths);
+    const nodeChanged = !sameStringArray(
+      expectedProcessPaths(rootPath, incoming),
+      current.activeProcessPaths,
+    );
 
     if (!categoryChanged && !supervisorChanged && !statusChanged && !emailChanged && !nodeChanged) {
       unchangedCount++;

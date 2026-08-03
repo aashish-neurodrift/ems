@@ -10,22 +10,19 @@ import {
 /**
  * Column names/types below mirror omind/backend/packages/database/src/models/identity/identity-models.ts
  * exactly for User, WorkspaceNode, NodeAssignment, RoleAssignment (tableName + underscored columns) so
- * this can read/write the *same* tables in a shared Postgres instance, and porting into @company/database
- * later means deleting these four classes in favor of the real import — not a schema change.
+ * this can read/write the *same* tables identity-service does, and porting into @company/database
+ * later means deleting these four classes in favor of the real import — not a schema change. `User`
+ * is bound to a DIFFERENT connection than the other three (see initControlPlaneModels vs
+ * initTenantModels below) — `users` is control-plane data, not tenant data.
  *
- * 'SUPERVISOR' / 'TEAM_LEADER' are not yet in identity-models.ts's UserRole union. The `role` column is
- * VARCHAR(32) with no DB check constraint, so writing these strings is safe today; add them to the TS
- * union in identity-models.ts when this ports in.
+ * The DB has a real CHECK constraint (users_role_check) restricting `role` to exactly these six
+ * values — there is no 'SUPERVISOR'/'TEAM_LEADER' role in this schema, only these RBAC-surfaced
+ * legacy buckets (see CLAUDE.md's RBAC roles list and identity-service's
+ * user-role-mapping.ts, which explicitly calls `role` "legacy"). Real permission differentiation
+ * for MWP's supervisor/team_leader categories comes from RoleAssignment.permissionGroupId, not
+ * this column — see CATEGORY_TO_ROLE in apply.ts/diff.ts for how those categories map here.
  */
-export type UserRole =
-  | 'SUPER_ADMIN'
-  | 'WORKSPACE_ADMIN'
-  | 'MANAGER'
-  | 'QA_MANAGER'
-  | 'QA'
-  | 'AGENT'
-  | 'SUPERVISOR'
-  | 'TEAM_LEADER';
+export type UserRole = 'SUPER_ADMIN' | 'WORKSPACE_ADMIN' | 'MANAGER' | 'QA_MANAGER' | 'QA' | 'AGENT';
 
 export class User extends Model<InferAttributes<User>, InferCreationAttributes<User>> {
   declare id: CreationOptional<string>;
@@ -140,7 +137,6 @@ export class MwpManualReviewQueue extends Model<
 }
 
 export interface MwpSyncModels {
-  User: typeof User;
   WorkspaceNode: typeof WorkspaceNode;
   NodeAssignment: typeof NodeAssignment;
   RoleAssignment: typeof RoleAssignment;
@@ -150,7 +146,17 @@ export interface MwpSyncModels {
   MwpManualReviewQueue: typeof MwpManualReviewQueue;
 }
 
-export function initModels(sequelize: Sequelize): MwpSyncModels {
+export interface ControlPlaneModels {
+  User: typeof User;
+}
+
+/**
+ * `users` is control-plane data ALWAYS (see identity-service's AuthRepository/
+ * UserManagementRepository — both fixed singletons bound to the control-plane DB, never
+ * per-tenant), regardless of a workspace's dbStrategy. This is the ONLY place User rows are
+ * created/updated — never in initTenantModels's connection, even for a dedicated workspace.
+ */
+export function initControlPlaneModels(sequelize: Sequelize): ControlPlaneModels {
   User.init(
     {
       id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
@@ -170,7 +176,13 @@ export function initModels(sequelize: Sequelize): MwpSyncModels {
     },
     { sequelize, tableName: 'users' },
   );
+  return { User };
+}
 
+/** WorkspaceNode/NodeAssignment/RoleAssignment (tenant-scoped, referencing User ids BY VALUE —
+ * no enforced cross-database FK, see node-guardrails-sql.ts's dropCrossDatabaseForeignKeys) plus
+ * this job's own tables, all bound to the workspace's dedicated/shard DB. */
+export function initTenantModels(sequelize: Sequelize): MwpSyncModels {
   WorkspaceNode.init(
     {
       id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
@@ -265,7 +277,6 @@ export function initModels(sequelize: Sequelize): MwpSyncModels {
   );
 
   return {
-    User,
     WorkspaceNode,
     NodeAssignment,
     RoleAssignment,

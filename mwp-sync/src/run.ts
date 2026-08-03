@@ -5,11 +5,13 @@ import type { Sequelize } from 'sequelize';
 import { loadConfig, type MwpSyncConfig } from './config.js';
 import { createConnection } from './db/connection.js';
 import { bootstrapMwpSyncTables } from './db/bootstrap-sql.js';
-import { initModels, type MwpSyncModels } from './db/models.js';
+import { initControlPlaneModels, initTenantModels, type ControlPlaneModels, type MwpSyncModels } from './db/models.js';
 import { fetchMwpActiveUsers } from './mwp-client.js';
 import { normalizeRecord } from './normalize.js';
 import { loadCurrentState, diff } from './diff.js';
 import { applyDiff } from './apply.js';
+import { assertControlPlaneReady, assertTargetIsDedicatedWorkspaceDb } from './preflight.js';
+import { getWorkspaceRootNode } from './tree.js';
 
 export interface RunSummary {
   syncBatchId: string;
@@ -23,8 +25,13 @@ export interface RunSummary {
   errors: { fusionId: string; message: string }[];
 }
 
-/** Core sync logic, reusable across a one-shot CLI run and a long-lived cron process. */
+/** Core sync logic, reusable across a one-shot CLI run and a long-lived cron process.
+ * Two separate database connections: `sequelize`/`models` is the workspace's tenant (dedicated
+ * or shard) DB; `controlPlaneSequelize`/`controlPlaneModels` is identity-service's control-plane
+ * DB, where `users` rows actually live (see db/models.ts's initControlPlaneModels docstring). */
 export async function runSyncWithConnection(
+  controlPlaneSequelize: Sequelize,
+  controlPlaneModels: ControlPlaneModels,
   sequelize: Sequelize,
   models: MwpSyncModels,
   config: MwpSyncConfig,
@@ -61,12 +68,24 @@ export async function runSyncWithConnection(
     // mwp_employee_raw above; brand-new ones are skipped (see diff.ts), never auto-created as Users.
     const normalized = response.data.map(normalizeRecord);
 
-    // Step 3 — diff against local DB, keyed by fusion_id (= employeeId).
-    const currentByEmployeeId = await loadCurrentState(models, config.workspaceId);
-    const diffResult = diff(currentByEmployeeId, normalized);
+    // Step 3 — diff against local DB, keyed by fusion_id (= employeeId). The Geography tree
+    // nests under the workspace's existing root node (getWorkspaceRootNode), never under a node
+    // this job creates itself.
+    const root = await getWorkspaceRootNode(models, config.workspaceId);
+    const currentByEmployeeId = await loadCurrentState(models, controlPlaneModels, config.workspaceId);
+    const diffResult = diff(currentByEmployeeId, normalized, root.path, config.permissionGroupIdByCategory);
 
     // Step 4 — apply per the condition table.
-    const applyResult = await applyDiff(sequelize, models, config, diffResult, syncBatchId);
+    const applyResult = await applyDiff(
+      controlPlaneSequelize,
+      controlPlaneModels,
+      sequelize,
+      models,
+      config,
+      diffResult,
+      syncBatchId,
+      root,
+    );
 
     await models.MwpSyncRun.update(
       {
@@ -107,18 +126,32 @@ export async function runSyncWithConnection(
   }
 }
 
-/** CLI entrypoint for a single manual run: `npm run sync:once`. */
+/** CLI entrypoint for a single manual run: `npm run sync:once`. Opens exactly two connections —
+ * the workspace's tenant DB and the shared control-plane DB — both verified by their own
+ * fail-closed preflight check before anything is read or written. */
 async function main(): Promise<void> {
   const config = loadConfig();
   const sequelize = createConnection(config.databaseUrl);
+  const controlPlaneSequelize = createConnection(config.controlPlaneDatabaseUrl);
   try {
     await sequelize.authenticate();
+    await assertTargetIsDedicatedWorkspaceDb(sequelize, config);
+    await controlPlaneSequelize.authenticate();
+    await assertControlPlaneReady(controlPlaneSequelize, config);
     await bootstrapMwpSyncTables(sequelize);
-    const models = initModels(sequelize);
-    const summary = await runSyncWithConnection(sequelize, models, config);
+    const models = initTenantModels(sequelize);
+    const controlPlaneModels = initControlPlaneModels(controlPlaneSequelize);
+    const summary = await runSyncWithConnection(
+      controlPlaneSequelize,
+      controlPlaneModels,
+      sequelize,
+      models,
+      config,
+    );
     console.info('[mwp-sync] run complete', summary);
   } finally {
     await sequelize.close();
+    await controlPlaneSequelize.close();
   }
 }
 

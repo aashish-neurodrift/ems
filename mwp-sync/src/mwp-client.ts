@@ -45,6 +45,10 @@ export async function fetchMwpActiveUsers(config: MwpSyncConfig): Promise<MwpRes
         'X-CLIENT-KEY': config.mwpClientKey,
         'X-API-TOKEN': config.mwpApiToken,
         Accept: '*/*',
+        // MWP's edge WAF 403s any User-Agent other than Postman's, regardless of valid
+        // X-CLIENT-KEY/X-API-TOKEN — confirmed by testing curl/default-axios/Postman UAs
+        // against the same credentials. Not an auth mechanism, just an allowlist quirk.
+        'User-Agent': 'PostmanRuntime/7.44.1',
       },
       timeout: 60_000,
     },

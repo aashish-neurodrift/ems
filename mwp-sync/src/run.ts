@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 
 import type { Sequelize } from 'sequelize';
 
@@ -155,7 +156,7 @@ async function main(): Promise<void> {
   }
 }
 
-const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
+const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
   main().catch((error) => {
     console.error('[mwp-sync] run failed', error);
